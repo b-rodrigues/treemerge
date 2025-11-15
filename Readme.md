@@ -45,13 +45,13 @@ treemerge ./data -o merged.txt --split-every 50000 \
 ### Nix (flake)
 
 ```bash
-nix run github:yourname/treemerge
+nix run github:b-rodrigues/treemerge
 ```
 
 Or build:
 
 ```bash
-nix build github:yourname/treemerge
+nix build github:b-rodrigues/treemerge
 ```
 
 ### Cargo

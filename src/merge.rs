@@ -4,35 +4,37 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};
 
 pub fn run(args: CliArgs) -> Result<()> {
     let root = args.path;
 
-    // Parallel scan
+    //
+    // Parallel pre-scan
+    //
     let (file_count, total_size, all_files) =
         pre_scan(&root, args.verbose, args.no_confirm)?;
 
     //
-    // Dry-run early return
+    // Dry-run mode
     //
     if args.dry_run {
         println!("Dry-run: no files will be created.");
-        println!("Detected {} files, total size {:.2} MB.",
+        println!(
+            "Detected {} files, total size {:.2} MB.",
             file_count,
             total_size as f64 / (1024.0 * 1024.0)
         );
-        println!();
-        println!("Files to be merged:");
 
+        println!("\nFiles to be merged:");
         for f in &all_files {
             println!(" - {}", f.display());
         }
 
-        println!();
-        println!("Estimated output size: {:.2} MB",
+        println!(
+            "\nEstimated output size: {:.2} MB",
             total_size as f64 / 1024.0 / 1024.0
         );
 
@@ -40,24 +42,26 @@ pub fn run(args: CliArgs) -> Result<()> {
     }
 
     //
-    // Filtering (extensions, exclude globs)
+    // Filtering (extensions + exclude globs)
     //
     let exclude_set = build_exclude_set(&args.exclude)?;
-    let follow_links = args.follow_symlinks;
     let split_every = args.split_every.unwrap_or(usize::MAX);
+
     let output_base =
         args.output.clone().unwrap_or_else(|| PathBuf::from("treemerge.txt"));
 
-    // Build merging list with filtering
     let mut merge_files = Vec::new();
     for f in all_files {
         let rel = f.strip_prefix(&root).unwrap_or(&f);
+
         if is_excluded(rel, &exclude_set) {
             continue;
         }
+
         if !is_text_file(&f, &args.exts)? {
             continue;
         }
+
         merge_files.push(f);
     }
 
@@ -73,7 +77,7 @@ pub fn run(args: CliArgs) -> Result<()> {
     };
 
     //
-    // Merge files
+    // Actual merging
     //
     let mut current_lines = 0usize;
     let mut chunk_index = 1usize;
@@ -97,14 +101,15 @@ pub fn run(args: CliArgs) -> Result<()> {
             current_lines = 0;
         }
 
-        // Write header
+        // Header
         write_header(&mut writer, rel, args.header_style)?;
         current_lines += header_line_count;
 
-        // Write contents
+        // Contents
         let file = File::open(f)?;
         let mut br = BufReader::new(file);
         let mut line = String::new();
+
         while br.read_line(&mut line)? > 0 {
             writer.write_all(line.as_bytes())?;
             current_lines += 1;
@@ -119,9 +124,11 @@ pub fn run(args: CliArgs) -> Result<()> {
     Ok(())
 }
 
+//
 // ============================================================================
 // Pre-scan (parallel)
 // ============================================================================
+//
 
 fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
     -> Result<(usize, u64, Vec<PathBuf>)>
@@ -140,7 +147,6 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
 
     let results = entries.par_iter().map(|entry| {
         let depth = entry.depth();
-
         if entry.file_type().is_file() {
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             (true, size, depth)
@@ -185,14 +191,16 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
     }
 
     if total_size > MAX_TOTAL {
-        eprintln!("Warning: total input size {:.2} GB.",
+        eprintln!(
+            "Warning: total input size {:.2} GB.",
             total_size as f64 / 1024.0 / 1024.0 / 1024.0
         );
         risky = true;
     }
 
     if estimated_output > LARGE_OUTPUT_WARNING {
-        eprintln!("Warning: estimated output {:.2} GB.",
+        eprintln!(
+            "Warning: estimated output {:.2} GB.",
             estimated_output as f64 / 1024.0 / 1024.0 / 1024.0
         );
         risky = true;
@@ -212,7 +220,7 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
 
         let a = answer.trim().to_lowercase();
         if a != "y" && a != "yes" {
-            return Err(anyhow!("Aborted by user"));
+            return Err(anyhow!("Aborted by user."));
         }
     }
 
@@ -225,7 +233,8 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
     }
 
     if verbose {
-        eprintln!("Pre-scan: {} files, {:.2} MB total.",
+        eprintln!(
+            "Pre-scan: {} files, {:.2} MB total.",
             file_count,
             total_size as f64 / 1024.0 / 1024.0
         );
@@ -234,9 +243,11 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
     Ok((file_count, total_size, files))
 }
 
+//
 // ============================================================================
 // Helpers
 // ============================================================================
+//
 
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
@@ -250,7 +261,11 @@ fn is_excluded(path: &Path, set: &GlobSet) -> bool {
     set.is_match(path)
 }
 
+//
+// --- NEW 8 KB TEXT DETECTOR -----------------------------------------------
+//
 fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
+    // Extension filter (fast path)
     if !exts.is_empty() {
         if let Some(ext) = path.extension().and_then(|x| x.to_str()) {
             return Ok(exts.iter().any(|e| e.eq_ignore_ascii_case(ext)));
@@ -259,8 +274,17 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
         }
     }
 
-    let data = fs::read(path)?;
-    Ok(infer::is_text(&data))
+    // Efficient partial read
+    const BUFFER_SIZE: usize = 8192;
+    let mut file = File::open(path)?;
+    let mut buffer = [0u8; BUFFER_SIZE];
+
+    let n = file.read(&mut buffer)?;
+    if n == 0 {
+        return Ok(false);
+    }
+
+    Ok(infer::is_text(&buffer[..n]))
 }
 
 fn count_lines(path: &Path) -> Result<usize> {
@@ -274,7 +298,10 @@ fn open_writer(base: &Path, index: usize) -> Result<BufWriter<File>> {
         base.to_path_buf()
     } else {
         let stem = base.file_stem().unwrap().to_string_lossy();
-        let ext = base.extension().map(|x| format!(".{}", x.to_string_lossy())).unwrap_or_default();
+        let ext = base
+            .extension()
+            .map(|x| format!(".{}", x.to_string_lossy()))
+            .unwrap_or_default();
         let new = format!("{}_{}{}", stem, index, ext);
         base.with_file_name(new)
     };
@@ -321,4 +348,3 @@ fn make_progress_bar(len: u64) -> ProgressBar {
     );
     pb
 }
- 

@@ -1,0 +1,129 @@
+.TH TREEMERGE 1 "January 2025" "treemerge 0.1.0" "User Commands"
+.SH NAME
+treemerge \- recursively merge plain text files from a directory tree
+
+.SH SYNOPSIS
+.B treemerge
+[\fIOPTIONS\fR] \fIPATH\fR
+
+.SH DESCRIPTION
+\fBtreemerge\fR scans a directory tree, identifies plain text files, and
+concatenates them into one or more output files. Each file is preceded
+by a header showing its relative path.
+
+The tool can optionally split the output every N lines, filter by
+extension, exclude paths via glob patterns, follow symlinks, and show a
+dry-run of the planned merge.
+
+Before merging, \fBtreemerge\fR performs a safety pre-scan. If the tree
+contains unusually many files, very large files, or deep nesting,
+warnings are shown and the user is asked for confirmation unless
+\fB\-\-no-confirm\fR is provided.
+
+.SH OPTIONS
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write merged output to \fIFILE\fR (default: \fBtreemerge.txt\fR).  
+If splitting is enabled, additional files are created using numeric
+suffixes.
+
+.TP
+.BR \-x ", " \-\-exclude " " \fIGLOB\fR
+Exclude files or directories matching a glob pattern.  
+This option may be repeated.
+
+.TP
+.BR \-e ", " \-\-ext " " \fIEXT\fR
+Only include files with this extension (without dot).  
+Repeat for multiple allowed extensions.
+
+.TP
+.BR \-\-split-every " " \fIN\fR
+Split output files every \fIN\fR lines.  
+Files are never split in the middle; a new chunk always starts before a
+file that would exceed the limit.
+
+.TP
+.BR \-\-header-style " " \fISTYLE\fR
+Choose file header format:
+.br
+  \fBplain\fR:   "=== path/to/file ==="
+.br
+  \fBhash\fR:    "## path/to/file"
+.br
+  \fBunderline\fR:  
+    path/to/file  
+    ---------------
+
+.TP
+.BR \-\-dry-run
+Do not write any output.  
+Show matching files, total size, and estimated output size.
+
+.TP
+.BR \-\-no-confirm
+Skip safety prompts even when risky conditions are detected.
+
+.TP
+.BR \-\-follow-symlinks
+Follow symlinks during directory traversal.
+
+.TP
+.BR \-v ", " \-\-verbose
+Print each processed file.
+
+.TP
+.BR \-\-help
+Display help and exit.
+
+.SH EXAMPLES
+.TP
+Merge all text files under \fB./data\fR:
+.RS
+.nf
+treemerge ./data
+.fi
+.RE
+
+.TP
+Merge only \fB.txt\fR and \fB.md\fR files:
+.RS
+.nf
+treemerge ./docs --ext txt --ext md
+.fi
+.RE
+
+.TP
+Split output every 50,000 lines and exclude logs:
+.RS
+.nf
+treemerge ./src --split-every 50000 --exclude "*.log"
+.fi
+.RE
+
+.TP
+Dry-run preview:
+.RS
+.nf
+treemerge ./corpus --dry-run
+.fi
+.RE
+
+.SH EXIT STATUS
+.TP
+0
+Success.
+.TP
+1
+Error or aborted by user.
+
+.SH AUTHOR
+Written by Your Name.
+
+.SH LICENSE
+MIT License.
+
+.SH SEE ALSO
+.BR grep (1),
+.BR find (1)
+ 

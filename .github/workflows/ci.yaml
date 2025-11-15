@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Nix
+      - uses: cachix/install-nix-action@v31
+
+      # Build via your flake
+      - name: Nix build
+        run: nix build --print-build-logs
+
+      # Run tests using the flake environment
+      - name: Test (flake environment)
+        run: nix develop --command cargo test --verbose

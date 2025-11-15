@@ -22,6 +22,12 @@
           };
 
           nativeBuildInputs = [ pkgs.pkg-config ];
+
+          # Install the man page into share/man/man1
+          postInstall = ''
+            mkdir -p $out/share/man/man1
+            cp ${self}/treemerge.1 $out/share/man/man1/
+          '';
         };
 
         apps.default = {
@@ -31,4 +37,3 @@
       }
     );
 }
- 

@@ -97,6 +97,12 @@ Precompiled binaries for Linux and macOS are available on the
 **GitHub Releases page**:  
 <https://github.com/b-rodrigues/treemerge/releases>
 
+Download the binary and make it executable:
+
+```bash
+chmod +x treemerge-x86_64-linux
+```
+
 ### Nix (flake)
 
 ```bash

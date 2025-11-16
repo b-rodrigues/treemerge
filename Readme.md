@@ -1,5 +1,7 @@
 # treemerge
 
+*Caveat emptor: The code of this project is 100% clanker-generated.*
+
 `treemerge` recursively scans a directory tree, identifies plain-text files, and concatenates them into one or more output files. Each file is preceded by a header showing its relative path. The tool is designed for building reproducible text corpora, audits, and archival bundles — especially for supplying contextual text to LLMs.
 
 ## Features

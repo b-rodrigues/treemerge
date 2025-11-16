@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        system:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-darwin
+          - aarch64-darwin
+
+    runs-on: ${{ contains(matrix.system, 'darwin') && 'macos-latest' || 'ubuntu-latest' }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+
+      # Build the binary for the platform
+      - name: Nix build
+        run: nix build --print-build-logs .#treemerge
+
+      - name: Collect artifacts
+        run: |
+          mkdir artifacts
+          cp result/bin/treemerge artifacts/treemerge-${{ matrix.system }}
+          cp treemerge.1 artifacts/
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

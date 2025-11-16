@@ -8,6 +8,6 @@ walkdir = "2"
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 anyhow = "1"
-infer = "0.15"
+infer = "0.19"
 rayon = "1.10"
-indicatif = "0.17"
+indicatif = "0.18.3"

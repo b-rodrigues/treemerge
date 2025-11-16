@@ -1,4 +1,4 @@
-.TH TREEMERGE 1 "January 2025" "treemerge 0.1.0" "User Commands"
+.TH TREEMERGE 1 "November 2025" "treemerge 0.0.1" "User Commands"
 .SH NAME
 treemerge \- recursively merge plain text files from a directory tree
 
@@ -12,34 +12,47 @@ concatenates them into one or more output files. Each file is preceded
 by a header showing its relative path.
 
 The tool can optionally split the output every N lines, filter by
-extension, exclude paths via glob patterns, follow symlinks, and show a
-dry-run of the planned merge.
+extension, exclude or include paths via glob patterns, follow symlinks,
+and show a dry-run of the planned merge.
+
+By default, \fBtreemerge\fR applies a small set of built-in exclusion
+rules to skip common noise such as version control metadata (.git/),
+lockfiles, license files, build outputs, and caches. These defaults can
+be disabled via \fB\-\-all\-files\fR, extended with \fB\-\-exclude\fR, or
+overridden for specific paths with \fB\-\-include\fR.
 
 Before merging, \fBtreemerge\fR performs a safety pre-scan. If the tree
-contains unusually many files, very large files, or deep nesting,
-warnings are shown and the user is asked for confirmation unless
-\fB\-\-no-confirm\fR is provided.
+contains unusually many files, very large files, or deep nesting, warnings
+are shown and the user is asked for confirmation unless
+\fB\-\-no\-confirm\fR is provided.
 
 .SH OPTIONS
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
-Write merged output to \fIFILE\fR (default: \fBtreemerge.txt\fR).  
+Write merged output to \fIFILE\fR (default: \fBtreemerge.txt\fR).
 If splitting is enabled, additional files are created using numeric
 suffixes.
 
 .TP
 .BR \-x ", " \-\-exclude " " \fIGLOB\fR
-Exclude files or directories matching a glob pattern.  
-This option may be repeated.
+Exclude files or directories matching a glob pattern.
+This option may be repeated. Excludes are applied after includes and
+before the built-in default excludes.
+
+.TP
+.BR \-i ", " \-\-include " " \fIGLOB\fR
+Force-include files or directories matching a glob pattern. This option
+may be repeated. Includes override both user-specified excludes and
+built-in default excludes.
 
 .TP
 .BR \-e ", " \-\-ext " " \fIEXT\fR
-Only include files with this extension (without dot).  
+Only include files with this extension (without dot).
 Repeat for multiple allowed extensions.
 
 .TP
 .BR \-\-split-every " " \fIN\fR
-Split output files every \fIN\fR lines.  
+Split output files every \fIN\fR lines.
 Files are never split in the middle; a new chunk always starts before a
 file that would exceed the limit.
 
@@ -51,14 +64,23 @@ Choose file header format:
 .br
   \fBhash\fR:    "## path/to/file"
 .br
-  \fBunderline\fR:  
-    path/to/file  
-    ---------------
+  \fBunderline\fR:
+.br
+  \ \ path/to/file
+.br
+  \ \ ---------------
 
 .TP
 .BR \-\-dry-run
-Do not write any output.  
-Show matching files, total size, and estimated output size.
+Do not write any output.
+Show discovered files, total size, and estimated output size before
+filters are applied.
+
+.TP
+.BR \-\-all\-files
+Disable the built-in exclusion rules (e.g. .git/, lockfiles, LICENSE
+files, build artifacts, caches). User-specified includes and excludes
+still apply.
 
 .TP
 .BR \-\-no-confirm
@@ -70,11 +92,36 @@ Follow symlinks during directory traversal.
 
 .TP
 .BR \-v ", " \-\-verbose
-Print each processed file.
+Print additional information during processing. When enabled, progress
+bars are suppressed in favor of plain log output.
 
 .TP
 .BR \-\-help
 Display help and exit.
+
+.SH DEFAULT EXCLUDES
+By default, \fBtreemerge\fR skips the following categories of files and
+directories:
+
+.IP \(bu 2
+Version control metadata: .git/, .svn/, .hg/
+.IP \(bu 2
+Build and distribution outputs: target/, build/, dist/, out/
+.IP \(bu 2
+Caches and environments: __pycache__/, .venv/, .cache/, .mypy_cache/,
+.pytest_cache/, .idea/, .vscode/, node_modules/
+.IP \(bu 2
+Documentation builds: _site/, _book/, docs/_build/
+.IP \(bu 2
+Boilerplate/legal files: LICENSE, LICENSE.*, COPYING, NOTICE
+.IP \(bu 2
+Lockfiles: *.lock, Pipfile.lock, poetry.lock, package-lock.json,
+pnpm-lock.yaml, yarn.lock
+.IP \(bu 2
+Common compiled artifacts: *.pyc, *.pyo, *.o, *.a, *.so, *.dylib, *.dll, *.exe
+
+Use \fB\-\-all\-files\fR to disable these defaults, \fB\-\-exclude\fR to add
+more excludes, and \fB\-\-include\fR to force-include specific paths.
 
 .SH EXAMPLES
 .TP
@@ -102,6 +149,22 @@ treemerge ./src --split-every 50000 --exclude "*.log"
 .RE
 
 .TP
+Include lockfiles even though they are ignored by default:
+.RS
+.nf
+treemerge . --include "*.lock"
+.fi
+.RE
+
+.TP
+Disable all default excludes and include absolutely everything:
+.RS
+.nf
+treemerge . --all-files
+.fi
+.RE
+
+.TP
 Dry-run preview:
 .RS
 .nf
@@ -118,12 +181,11 @@ Success.
 Error or aborted by user.
 
 .SH AUTHOR
-Written by Your Name.
+Written by Bruno Rodrigues and GPT 5.1.
 
 .SH LICENSE
-MIT License.
+GPL v3.
 
 .SH SEE ALSO
 .BR grep (1),
 .BR find (1)
- 

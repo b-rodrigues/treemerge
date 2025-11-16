@@ -261,11 +261,8 @@ fn is_excluded(path: &Path, set: &GlobSet) -> bool {
     set.is_match(path)
 }
 
-//
-// --- NEW 8 KB TEXT DETECTOR -----------------------------------------------
-//
 fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
-    // Extension filter (fast path)
+    // Fast path: filter by extension if provided
     if !exts.is_empty() {
         if let Some(ext) = path.extension().and_then(|x| x.to_str()) {
             return Ok(exts.iter().any(|e| e.eq_ignore_ascii_case(ext)));
@@ -274,17 +271,40 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
         }
     }
 
-    // Efficient partial read
+    // Efficient partial read: 8 KB
     const BUFFER_SIZE: usize = 8192;
     let mut file = File::open(path)?;
     let mut buffer = [0u8; BUFFER_SIZE];
-
     let n = file.read(&mut buffer)?;
     if n == 0 {
         return Ok(false);
     }
 
-    Ok(infer::text::is_text(&buffer[..n]))
+    let buf = &buffer[..n];
+
+    // Use infer’s MIME detection API
+    if let Some(kind) = infer::get(buf) {
+        // If MIME starts with text/ treat as text
+        if kind.mime_type().starts_with("text/") {
+            return Ok(true);
+        }
+        // Some "application/" types are also text-based (json, xml, javascript, etc.)
+        if matches!(
+            kind.mime_type(),
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-sh"
+                | "application/x-yaml"
+                | "application/x-toml"
+        ) {
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    // Fallback: check if content is valid UTF-8
+    Ok(std::str::from_utf8(buf).is_ok())
 }
 
 fn count_lines(path: &Path) -> Result<usize> {
@@ -348,4 +368,5 @@ fn make_progress_bar(len: u64) -> ProgressBar {
     );
     pb
 }
+
 

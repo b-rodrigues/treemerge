@@ -284,7 +284,7 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
         return Ok(false);
     }
 
-    Ok(infer::is_text(&buffer[..n]))
+    Ok(infer::text::is_text(&buffer[..n]))
 }
 
 fn count_lines(path: &Path) -> Result<usize> {
@@ -348,3 +348,4 @@ fn make_progress_bar(len: u64) -> ProgressBar {
     );
     pb
 }
+

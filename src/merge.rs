@@ -1,466 +1,272 @@
-use crate::cli::{CliArgs, HeaderStyle};
-use anyhow::{anyhow, Result};
+use crate::cli::{Args, HeaderStyle};
+use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
-pub fn run(args: CliArgs) -> Result<()> {
-    let root = args.path;
-
-    //
-    // Parallel pre-scan (size, count, depth, etc.)
-    //
-    let (file_count, total_size, all_files) =
-        pre_scan(&root, args.verbose, args.no_confirm, args.follow_symlinks)?;
-
-    //
-    // Dry-run mode
-    //
-    if args.dry_run {
-        println!("Dry-run: no files will be created.");
-        println!(
-            "Detected {} files, total size {:.2} MB.",
-            file_count,
-            total_size as f64 / (1024.0 * 1024.0)
-        );
-
-        println!("\nFiles discovered (before filters):");
-        for f in &all_files {
-            println!(" - {}", f.display());
-        }
-
-        println!(
-            "\nEstimated output size: {:.2} MB",
-            total_size as f64 / 1024.0 / 1024.0
-        );
-
-        return Ok(());
-    }
-
-    //
-    // Build include / exclude sets
-    //
-    let include_set = build_globset(&args.include)?;
-    let user_exclude_set = build_globset(&args.exclude)?;
-    let default_exclude_set = build_default_exclude_set(args.all_files)?;
-
-    let split_every = args.split_every.unwrap_or(usize::MAX);
-    let output_base =
-        args.output.clone().unwrap_or_else(|| PathBuf::from("treemerge.txt"));
-
-    //
-    // Apply filters to decide which files to merge
-    //
-    let mut merge_files = Vec::new();
-    for f in all_files {
-        let rel = f.strip_prefix(&root).unwrap_or(&f);
-
-        if should_skip(rel, &include_set, &user_exclude_set, &default_exclude_set) {
-            continue;
-        }
-
-        if !is_text_file(&f, &args.exts)? {
-            continue;
-        }
-
-        merge_files.push(f);
-    }
-
-    //
-    // Progress bar
-    //
-    let pb = if !args.verbose {
-        let bar = make_progress_bar(merge_files.len() as u64);
-        bar.set_message("Merging files");
-        Some(bar)
-    } else {
-        None
-    };
-
-    //
-    // Actual merging
-    //
-    let mut current_lines = 0usize;
-    let mut chunk_index = 1usize;
-    let mut writer = open_writer(&output_base, chunk_index)?;
-
-    for f in &merge_files {
-        if let Some(pb) = &pb {
-            pb.inc(1);
-        }
-
-        let rel = f.strip_prefix(&root).unwrap_or(f);
-
-        // Count lines
-        let file_line_count = count_lines(f)?;
-        let header_line_count = header_line_count(&args.header_style);
-
-        // Start new chunk if needed (never split a file)
-        if current_lines + header_line_count + file_line_count > split_every {
-            chunk_index += 1;
-            writer = open_writer(&output_base, chunk_index)?;
-            current_lines = 0;
-        }
-
-        // Header
-        write_header(&mut writer, rel, args.header_style)?;
-        current_lines += header_line_count;
-
-        // Contents
-        let file = File::open(f)?;
-        let mut br = BufReader::new(file);
-        let mut line = String::new();
-
-        while br.read_line(&mut line)? > 0 {
-            writer.write_all(line.as_bytes())?;
-            current_lines += 1;
-            line.clear();
-        }
-    }
-
-    if let Some(pb) = pb {
-        pb.finish_with_message("Done");
-    }
-
-    Ok(())
-}
-
-//
-// ============================================================================
-// Pre-scan (parallel)
-// ============================================================================
-//
-
-fn pre_scan(
-    path: &Path,
-    verbose: bool,
-    no_confirm: bool,
-    follow_links: bool,
-) -> Result<(usize, u64, Vec<PathBuf>)> {
-    const MAX_FILES: usize = 20_000;
-    const MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
-    const MAX_TOTAL: u64 = 4 * 1024 * 1024 * 1024;
-    const MAX_DEPTH: usize = 20;
-    const LARGE_OUTPUT_WARNING: u64 = 1 * 1024 * 1024 * 1024;
-
-    let entries: Vec<_> = WalkDir::new(path)
-        .follow_links(follow_links)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .collect();
-
-    let results = entries
-        .par_iter()
-        .map(|entry| {
-            let depth = entry.depth();
-            if entry.file_type().is_file() {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                (true, size, depth)
-            } else {
-                (false, 0u64, depth)
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut file_count = 0usize;
-    let mut total_size = 0u64;
-    let mut max_depth = 0usize;
-    let mut large_files = Vec::new();
-
-    for (is_file, size, depth) in &results {
-        if *depth > max_depth {
-            max_depth = *depth;
-        }
-        if *is_file {
-            file_count += 1;
-            total_size += size;
-            if *size >= MAX_FILE_SIZE {
-                large_files.push(*size);
-            }
-        }
-    }
-
-    let estimated_output = total_size + (file_count as u64 * 128);
-
-    //
-    // Warnings
-    //
-    let mut risky = false;
-
-    if file_count > MAX_FILES {
-        eprintln!("Warning: {} files detected.", file_count);
-        risky = true;
-    }
-
-    if !large_files.is_empty() {
-        eprintln!("Warning: {} files >= 200MB.", large_files.len());
-        risky = true;
-    }
-
-    if total_size > MAX_TOTAL {
-        eprintln!(
-            "Warning: total input size {:.2} GB.",
-            total_size as f64 / 1024.0 / 1024.0 / 1024.0
-        );
-        risky = true;
-    }
-
-    if estimated_output > LARGE_OUTPUT_WARNING {
-        eprintln!(
-            "Warning: estimated output {:.2} GB.",
-            estimated_output as f64 / 1024.0 / 1024.0 / 1024.0
-        );
-        risky = true;
-    }
-
-    if max_depth > MAX_DEPTH {
-        eprintln!("Warning: directory depth {}.", max_depth);
-        risky = true;
-    }
-
-    if risky && !no_confirm {
-        eprint!("Continue? [y/N]: ");
-        io::stdout().flush().ok();
-
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-
-        let a = answer.trim().to_lowercase();
-        if a != "y" && a != "yes" {
-            return Err(anyhow!("Aborted by user."));
-        }
-    }
-
-    // Collect files for merging
-    let mut files = Vec::new();
-    for entry in WalkDir::new(path)
-        .follow_links(follow_links)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            files.push(entry.path().to_path_buf());
-        }
-    }
-
-    if verbose {
-        eprintln!(
-            "Pre-scan: {} files, {:.2} MB total.",
-            file_count,
-            total_size as f64 / 1024.0 / 1024.0
-        );
-    }
-
-    Ok((file_count, total_size, files))
-}
-
-//
-// ============================================================================
-// Helpers
-// ============================================================================
-//
-
-fn build_globset(patterns: &[String]) -> Result<GlobSet> {
+/// Build a GlobSet from patterns
+fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
-    for pat in patterns {
-        builder.add(Glob::new(pat)?);
+    for p in patterns {
+        builder.add(Glob::new(p).context("Invalid glob pattern")?);
     }
     Ok(builder.build()?)
 }
 
-fn build_default_exclude_set(all_files: bool) -> Result<GlobSet> {
-    if all_files {
-        // No default excludes
-        return GlobSetBuilder::new().build().map_err(Into::into);
-    }
-
-    // Default patterns that are usually not useful as "context" and often large/noisy
-    let defaults: &[&str] = &[
-        // VCS
-        ".git/**",
-        ".svn/**",
-        ".hg/**",
-        // Build / dist
-        "target/**",
-        "build/**",
-        "dist/**",
-        "out/**",
-        // Caches / env / IDE
-        "__pycache__/**",
-        ".venv/**",
-        ".cache/**",
-        ".mypy_cache/**",
-        ".pytest_cache/**",
-        ".idea/**",
-        ".vscode/**",
-        "node_modules/**",
-        // Docs builds
-        "_site/**",
-        "_book/**",
-        "docs/_build/**",
-        // Boilerplate / legal
-        "LICENSE",
-        "LICENSE.*",
-        "COPYING",
-        "NOTICE",
-        // Lockfiles
-        "*.lock",
-        "Pipfile.lock",
-        "poetry.lock",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        // Compiled / binary
-        "*.pyc",
-        "*.pyo",
-        "*.o",
-        "*.a",
-        "*.so",
-        "*.dylib",
-        "*.dll",
-        "*.exe",
-    ];
-
-    let mut builder = GlobSetBuilder::new();
-    for pat in defaults {
-        builder.add(Glob::new(pat)?);
-    }
-    Ok(builder.build()?)
-}
-
-/// Decide whether a path should be skipped based on include/exclude/default rules.
-///
-/// Precedence:
-/// 1. If it matches any include pattern -> always include.
-/// 2. Else if it matches any user exclude pattern -> skip.
-/// 3. Else if it matches any default exclude pattern -> skip.
-/// 4. Otherwise -> include.
-fn should_skip(
-    path: &Path,
-    include: &GlobSet,
-    exclude: &GlobSet,
-    default_exclude: &GlobSet,
-) -> bool {
-    if include.is_match(path) {
-        return false;
-    }
-    if exclude.is_match(path) {
-        return true;
-    }
-    if default_exclude.is_match(path) {
-        return true;
-    }
-    false
-}
-
-fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
-    // Extension filter (fast path)
-    if !exts.is_empty() {
+/// Check if a file looks like text using infer + UTF-8 heuristic
+fn is_text_file(path: &Path, allowed_exts: &[String]) -> Result<bool> {
+    // extension allowlist (fast path)
+    if !allowed_exts.is_empty() {
         if let Some(ext) = path.extension().and_then(|x| x.to_str()) {
-            return Ok(exts.iter().any(|e| e.eq_ignore_ascii_case(ext)));
+            return Ok(allowed_exts.iter().any(|e| e.eq_ignore_ascii_case(ext)));
         } else {
             return Ok(false);
         }
     }
 
-    // Efficient partial read
-    const BUFFER_SIZE: usize = 8192;
+    // content detection
+    const BUF_SIZE: usize = 8192;
     let mut file = File::open(path)?;
-    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut buf = [0u8; BUF_SIZE];
+    let n = file.read(&mut buf)?;
 
-    let n = file.read(&mut buffer)?;
     if n == 0 {
         return Ok(false);
     }
 
-    let buf = &buffer[..n];
-
-    // Use infer’s MIME detection API
-    if let Some(kind) = infer::get(buf) {
-        let mime = kind.mime_type();
-        if mime.starts_with("text/") {
+    if let Some(kind) = infer::get(&buf[..n]) {
+        if kind.mime_type().starts_with("text/") {
             return Ok(true);
         }
-        if matches!(
-            mime,
-            "application/json"
-                | "application/xml"
-                | "application/javascript"
-                | "application/x-sh"
-                | "application/x-yaml"
-                | "application/x-toml"
-        ) {
-            return Ok(true);
-        }
-        return Ok(false);
     }
 
-    // Fallback: treat valid UTF-8 as text
-    Ok(std::str::from_utf8(buf).is_ok())
+    Ok(std::str::from_utf8(&buf[..n]).is_ok())
 }
 
-fn count_lines(path: &Path) -> Result<usize> {
-    let file = File::open(path)?;
-    let br = BufReader::new(file);
-    Ok(br.lines().count())
+/// List of built-in excludes
+fn default_excludes() -> Vec<String> {
+    vec![
+        // VCS
+        ".git/**".into(),
+        ".svn/**".into(),
+        ".hg/**".into(),
+        // build dirs
+        "target/**".into(),
+        "dist/**".into(),
+        "build/**".into(),
+        "out/**".into(),
+        // caches
+        "__pycache__/**".into(),
+        ".cache/**".into(),
+        ".mypy_cache/**".into(),
+        ".pytest_cache/**".into(),
+        ".venv/**".into(),
+        ".idea/**".into(),
+        ".vscode/**".into(),
+        "node_modules/**".into(),
+        // docs output
+        "_site/**".into(),
+        "_book/**".into(),
+        "docs/_build/**".into(),
+        // boilerplate
+        "LICENSE".into(),
+        "LICENSE.*".into(),
+        "COPYING".into(),
+        "NOTICE".into(),
+        // lockfiles
+        "*.lock".into(),
+        "package-lock.json".into(),
+        "poetry.lock".into(),
+        "Pipfile.lock".into(),
+        "pnpm-lock.yaml".into(),
+        "yarn.lock".into(),
+        // binaries
+        "*.pyc".into(),
+        "*.pyo".into(),
+        "*.o".into(),
+        "*.so".into(),
+        "*.dll".into(),
+        "*.exe".into(),
+    ]
 }
 
-fn open_writer(base: &Path, index: usize) -> Result<BufWriter<File>> {
-    let path = if index == 1 {
-        base.to_path_buf()
-    } else {
-        let stem = base.file_stem().unwrap().to_string_lossy();
-        let ext = base
-            .extension()
-            .map(|x| format!(".{}", x.to_string_lossy()))
-            .unwrap_or_default();
-        let new = format!("{}_{}{}", stem, index, ext);
-        base.with_file_name(new)
-    };
+/// Determine whether a given path should be included
+fn should_include(
+    path: &Path,
+    includes: &GlobSet,
+    excludes: &GlobSet,
+    builtin_excludes: &GlobSet,
+    all_files: bool,
+) -> bool {
+    let s = path.to_string_lossy();
 
-    let f = File::create(path)?;
-    Ok(BufWriter::new(f))
+    if includes.is_match(&*s) {
+        return true;
+    }
+
+    if excludes.is_match(&*s) {
+        return false;
+    }
+
+    if !all_files && builtin_excludes.is_match(&*s) {
+        return false;
+    }
+
+    true
 }
 
-fn write_header(writer: &mut BufWriter<File>, path: &Path, style: HeaderStyle) -> Result<()> {
-    let rel = path.to_string_lossy();
+/// Format header for each file
+fn write_header<W: Write>(w: &mut W, style: HeaderStyle, path: &Path) -> Result<()> {
+    let s = path.to_string_lossy();
 
     match style {
         HeaderStyle::Plain => {
-            writeln!(writer, "=== {} ===", rel)?;
+            writeln!(w, ">>> {}", s)?;
         }
         HeaderStyle::Hash => {
-            writeln!(writer, "## {}", rel)?;
+            writeln!(w, "########## {}", s)?;
         }
         HeaderStyle::Underline => {
-            writeln!(writer, "{}", rel)?;
-            writeln!(writer, "{}", "-".repeat(rel.len()))?;
+            writeln!(w, "{}", s)?;
+            writeln!(w, "{}", "=".repeat(s.len()))?;
         }
     }
 
+    writeln!(w)?;
     Ok(())
 }
 
-fn header_line_count(style: &HeaderStyle) -> usize {
-    match style {
-        HeaderStyle::Plain => 1,
-        HeaderStyle::Hash => 1,
-        HeaderStyle::Underline => 2,
-    }
-}
+pub fn run(args: Args) -> Result<()> {
+    let root = &args.path;
 
-fn make_progress_bar(len: u64) -> ProgressBar {
-    let pb = ProgressBar::new(len);
+    // Only directories allowed
+    if !root.is_dir() {
+        return Err(anyhow!(
+            "treemerge only operates on directories: {}",
+            root.display()
+        ));
+    }
+
+    // Determine default output
+    let output_base = if let Some(o) = &args.output {
+        o.clone()
+    } else {
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("treemerge");
+        PathBuf::from(format!("{}.txt", name))
+    };
+
+    // Compile glob sets
+    let include_globs = compile_globs(&args.include)?;
+    let exclude_globs = compile_globs(&args.exclude)?;
+    let builtin_globs = if args.all_files {
+        compile_globs(&[])? // empty
+    } else {
+        compile_globs(&default_excludes())?
+    };
+
+    // Scan directory tree
+    let walker = WalkDir::new(root).follow_links(args.follow_symlinks);
+    let entries: Vec<DirEntry> = walker.into_iter().filter_map(|e| e.ok()).collect();
+
+    let files: Vec<PathBuf> = entries
+        .par_iter()
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            should_include(
+                &entry.path(),
+                &include_globs,
+                &exclude_globs,
+                &builtin_globs,
+                args.all_files,
+            )
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            match is_text_file(path, &args.ext) {
+                Ok(true) => Some(path.to_owned()),
+                _ => None,
+            }
+        })
+        .collect();
+
+    if files.is_empty() {
+        return Err(anyhow!("No text files matched criteria."));
+    }
+
+    // Estimate output size
+    let estimated: u64 = files
+        .par_iter()
+        .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    if !args.no_confirm && estimated > 500 * 1024 * 1024 {
+        return Err(anyhow!(
+            "estimated output exceeds 500MB; use --no-confirm to bypass."
+        ));
+    }
+
+    if args.dry_run {
+        println!("Dry-run. Would merge {} files:", files.len());
+        for f in &files {
+            println!("{}", f.display());
+        }
+        return Ok(());
+    }
+
+    // Progress bar
+    let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} {pos}/{len} [{bar:40.cyan/blue}] {msg}"
-        )
-        .unwrap()
-        .progress_chars("#>-"),
+        ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
     );
-    pb
+
+    let mut current_lines = 0usize;
+    let mut file_index = 0usize;
+
+    let mut out = BufWriter::new(File::create(&output_base)?);
+
+    for file in &files {
+        pb.inc(1);
+        pb.set_message(format!("{}", file.display()));
+
+        write_header(&mut out, args.header_style, file)?;
+
+        let mut reader = BufReader::new(File::open(file)?);
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line)?;
+            if n == 0 {
+                break;
+            }
+
+            out.write_all(line.as_bytes())?;
+            current_lines += 1;
+        }
+
+        // Check splitting
+        if let Some(limit) = args.split_every {
+            if current_lines >= limit {
+                out.flush()?;
+                file_index += 1;
+                current_lines = 0;
+                let next_name = output_base
+                    .with_file_name(format!("{}.part{}", output_base.display(), file_index));
+                out = BufWriter::new(File::create(next_name)?);
+            }
+        }
+    }
+
+    pb.finish_with_message("done");
+
+    Ok(())
 }

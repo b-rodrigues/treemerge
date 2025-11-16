@@ -1,21 +1,21 @@
 use crate::cli::{CliArgs, HeaderStyle};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 pub fn run(args: CliArgs) -> Result<()> {
     let root = args.path;
 
     //
-    // Parallel pre-scan
+    // Parallel pre-scan (size, count, depth, etc.)
     //
     let (file_count, total_size, all_files) =
-        pre_scan(&root, args.verbose, args.no_confirm)?;
+        pre_scan(&root, args.verbose, args.no_confirm, args.follow_symlinks)?;
 
     //
     // Dry-run mode
@@ -28,7 +28,7 @@ pub fn run(args: CliArgs) -> Result<()> {
             total_size as f64 / (1024.0 * 1024.0)
         );
 
-        println!("\nFiles to be merged:");
+        println!("\nFiles discovered (before filters):");
         for f in &all_files {
             println!(" - {}", f.display());
         }
@@ -42,19 +42,24 @@ pub fn run(args: CliArgs) -> Result<()> {
     }
 
     //
-    // Filtering (extensions + exclude globs)
+    // Build include / exclude sets
     //
-    let exclude_set = build_exclude_set(&args.exclude)?;
-    let split_every = args.split_every.unwrap_or(usize::MAX);
+    let include_set = build_globset(&args.include)?;
+    let user_exclude_set = build_globset(&args.exclude)?;
+    let default_exclude_set = build_default_exclude_set(args.all_files)?;
 
+    let split_every = args.split_every.unwrap_or(usize::MAX);
     let output_base =
         args.output.clone().unwrap_or_else(|| PathBuf::from("treemerge.txt"));
 
+    //
+    // Apply filters to decide which files to merge
+    //
     let mut merge_files = Vec::new();
     for f in all_files {
         let rel = f.strip_prefix(&root).unwrap_or(&f);
 
-        if is_excluded(rel, &exclude_set) {
+        if should_skip(rel, &include_set, &user_exclude_set, &default_exclude_set) {
             continue;
         }
 
@@ -68,7 +73,7 @@ pub fn run(args: CliArgs) -> Result<()> {
     //
     // Progress bar
     //
-    let pb = if !args.verbose && !args.dry_run {
+    let pb = if !args.verbose {
         let bar = make_progress_bar(merge_files.len() as u64);
         bar.set_message("Merging files");
         Some(bar)
@@ -94,7 +99,7 @@ pub fn run(args: CliArgs) -> Result<()> {
         let file_line_count = count_lines(f)?;
         let header_line_count = header_line_count(&args.header_style);
 
-        // Start new chunk if needed
+        // Start new chunk if needed (never split a file)
         if current_lines + header_line_count + file_line_count > split_every {
             chunk_index += 1;
             writer = open_writer(&output_base, chunk_index)?;
@@ -130,9 +135,12 @@ pub fn run(args: CliArgs) -> Result<()> {
 // ============================================================================
 //
 
-fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
-    -> Result<(usize, u64, Vec<PathBuf>)>
-{
+fn pre_scan(
+    path: &Path,
+    verbose: bool,
+    no_confirm: bool,
+    follow_links: bool,
+) -> Result<(usize, u64, Vec<PathBuf>)> {
     const MAX_FILES: usize = 20_000;
     const MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
     const MAX_TOTAL: u64 = 4 * 1024 * 1024 * 1024;
@@ -140,20 +148,23 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
     const LARGE_OUTPUT_WARNING: u64 = 1 * 1024 * 1024 * 1024;
 
     let entries: Vec<_> = WalkDir::new(path)
-        .follow_links(true)
+        .follow_links(follow_links)
         .into_iter()
         .filter_map(|e| e.ok())
         .collect();
 
-    let results = entries.par_iter().map(|entry| {
-        let depth = entry.depth();
-        if entry.file_type().is_file() {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            (true, size, depth)
-        } else {
-            (false, 0u64, depth)
-        }
-    }).collect::<Vec<_>>();
+    let results = entries
+        .par_iter()
+        .map(|entry| {
+            let depth = entry.depth();
+            if entry.file_type().is_file() {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                (true, size, depth)
+            } else {
+                (false, 0u64, depth)
+            }
+        })
+        .collect::<Vec<_>>();
 
     let mut file_count = 0usize;
     let mut total_size = 0u64;
@@ -224,9 +235,13 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
         }
     }
 
-    // Collect files
+    // Collect files for merging
     let mut files = Vec::new();
-    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(path)
+        .follow_links(follow_links)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             files.push(entry.path().to_path_buf());
         }
@@ -249,7 +264,7 @@ fn pre_scan(path: &Path, verbose: bool, no_confirm: bool)
 // ============================================================================
 //
 
-fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
+fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
         builder.add(Glob::new(pat)?);
@@ -257,12 +272,93 @@ fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
     Ok(builder.build()?)
 }
 
-fn is_excluded(path: &Path, set: &GlobSet) -> bool {
-    set.is_match(path)
+fn build_default_exclude_set(all_files: bool) -> Result<GlobSet> {
+    if all_files {
+        // No default excludes
+        return GlobSetBuilder::new().build().map_err(Into::into);
+    }
+
+    // Default patterns that are usually not useful as "context" and often large/noisy
+    let defaults: &[&str] = &[
+        // VCS
+        ".git/**",
+        ".svn/**",
+        ".hg/**",
+        // Build / dist
+        "target/**",
+        "build/**",
+        "dist/**",
+        "out/**",
+        // Caches / env / IDE
+        "__pycache__/**",
+        ".venv/**",
+        ".cache/**",
+        ".mypy_cache/**",
+        ".pytest_cache/**",
+        ".idea/**",
+        ".vscode/**",
+        "node_modules/**",
+        // Docs builds
+        "_site/**",
+        "_book/**",
+        "docs/_build/**",
+        // Boilerplate / legal
+        "LICENSE",
+        "LICENSE.*",
+        "COPYING",
+        "NOTICE",
+        // Lockfiles
+        "*.lock",
+        "Pipfile.lock",
+        "poetry.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        // Compiled / binary
+        "*.pyc",
+        "*.pyo",
+        "*.o",
+        "*.a",
+        "*.so",
+        "*.dylib",
+        "*.dll",
+        "*.exe",
+    ];
+
+    let mut builder = GlobSetBuilder::new();
+    for pat in defaults {
+        builder.add(Glob::new(pat)?);
+    }
+    Ok(builder.build()?)
+}
+
+/// Decide whether a path should be skipped based on include/exclude/default rules.
+///
+/// Precedence:
+/// 1. If it matches any include pattern -> always include.
+/// 2. Else if it matches any user exclude pattern -> skip.
+/// 3. Else if it matches any default exclude pattern -> skip.
+/// 4. Otherwise -> include.
+fn should_skip(
+    path: &Path,
+    include: &GlobSet,
+    exclude: &GlobSet,
+    default_exclude: &GlobSet,
+) -> bool {
+    if include.is_match(path) {
+        return false;
+    }
+    if exclude.is_match(path) {
+        return true;
+    }
+    if default_exclude.is_match(path) {
+        return true;
+    }
+    false
 }
 
 fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
-    // Fast path: filter by extension if provided
+    // Extension filter (fast path)
     if !exts.is_empty() {
         if let Some(ext) = path.extension().and_then(|x| x.to_str()) {
             return Ok(exts.iter().any(|e| e.eq_ignore_ascii_case(ext)));
@@ -271,10 +367,11 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
         }
     }
 
-    // Efficient partial read: 8 KB
+    // Efficient partial read
     const BUFFER_SIZE: usize = 8192;
     let mut file = File::open(path)?;
     let mut buffer = [0u8; BUFFER_SIZE];
+
     let n = file.read(&mut buffer)?;
     if n == 0 {
         return Ok(false);
@@ -284,13 +381,12 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
 
     // Use infer’s MIME detection API
     if let Some(kind) = infer::get(buf) {
-        // If MIME starts with text/ treat as text
-        if kind.mime_type().starts_with("text/") {
+        let mime = kind.mime_type();
+        if mime.starts_with("text/") {
             return Ok(true);
         }
-        // Some "application/" types are also text-based (json, xml, javascript, etc.)
         if matches!(
-            kind.mime_type(),
+            mime,
             "application/json"
                 | "application/xml"
                 | "application/javascript"
@@ -303,7 +399,7 @@ fn is_text_file(path: &Path, exts: &[String]) -> Result<bool> {
         return Ok(false);
     }
 
-    // Fallback: check if content is valid UTF-8
+    // Fallback: treat valid UTF-8 as text
     Ok(std::str::from_utf8(buf).is_ok())
 }
 
@@ -368,5 +464,3 @@ fn make_progress_bar(len: u64) -> ProgressBar {
     );
     pb
 }
-
-

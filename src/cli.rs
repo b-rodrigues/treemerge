@@ -12,9 +12,13 @@ pub struct CliArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Exclude patterns (glob). Can be repeated.
+    /// Exclude paths (glob). Can be repeated.
     #[arg(short = 'x', long = "exclude")]
     pub exclude: Vec<String>,
+
+    /// Force-include paths (glob), even if excluded by default rules or --exclude.
+    #[arg(short = 'i', long = "include")]
+    pub include: Vec<String>,
 
     /// Only include files with these extensions (no dot). Can be repeated.
     #[arg(short = 'e', long = "ext")]
@@ -43,6 +47,10 @@ pub struct CliArgs {
     /// Show what would be done, without producing output files.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Disable built-in default excludes (.git/, lockfiles, LICENSE, build outputs, etc.).
+    #[arg(long = "all-files")]
+    pub all_files: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -51,4 +59,3 @@ pub enum HeaderStyle {
     Hash,
     Underline,
 }
- 

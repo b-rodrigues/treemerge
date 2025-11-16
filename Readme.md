@@ -89,6 +89,12 @@ treemerge ./corpus --dry-run
 
 ## Installation
 
+### Prebuilt binaries
+
+Precompiled binaries for Linux and macOS are available on the  
+**GitHub Releases page**:  
+<https://github.com/b-rodrigues/treemerge/releases>
+
 ### Nix (flake)
 
 ```bash

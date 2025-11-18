@@ -123,6 +123,9 @@ fn should_include(
 fn write_header<W: Write>(w: &mut W, style: HeaderStyle, path: &Path) -> Result<()> {
     let s = path.to_string_lossy();
 
+    // Start with a blank line
+    writeln!(w)?;
+
     match style {
         HeaderStyle::Plain => {
             writeln!(w, ">>> {}", s)?;
@@ -139,6 +142,7 @@ fn write_header<W: Write>(w: &mut W, style: HeaderStyle, path: &Path) -> Result<
     writeln!(w)?;
     Ok(())
 }
+
 
 pub fn run(args: Args) -> Result<()> {
     let root = &args.path;

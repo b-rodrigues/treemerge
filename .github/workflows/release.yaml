@@ -31,8 +31,10 @@ jobs:
           authToken: '${{ secrets.CACHIX_AUTH }}'        
 
       # Build the binary for the platform
-      - name: Nix build
-        run: nix build --print-build-logs .#treemerge
+      - name: Push treemerge to Cachix
+        run: |
+          nix build .#treemerge --print-build-logs
+          cachix push rstats-on-nix $(readlink -f result)
 
       - name: Collect artifacts
         run: |
@@ -45,6 +47,3 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
-
-      - run: nix-store -qR --include-outputs $(nix-instantiate cachix.nix) | cachix push rstats-on-nix
-      - run: nix-shell cachix.nix --run "echo OK"

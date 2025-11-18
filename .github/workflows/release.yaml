@@ -40,3 +40,6 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+      - run: nix-store -qR --include-outputs $(nix-instantiate cachix.nix) | cachix push rstats-on-nix
+      - run: nix-shell cachix.nix --run "echo OK"

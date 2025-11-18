@@ -25,6 +25,11 @@ jobs:
 
       - uses: cachix/install-nix-action@v31
 
+      - uses: cachix/cachix-action@v15
+        with:
+          name: rstats-on-nix
+          authToken: '${{ secrets.CACHIX_AUTH }}'        
+
       # Build the binary for the platform
       - name: Nix build
         run: nix build --print-build-logs .#treemerge
